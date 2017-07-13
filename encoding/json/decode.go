@@ -136,6 +136,16 @@ func (e *UnmarshalTypeError) Error() string {
 	return "json: cannot unmarshal " + e.Value + " into Go value of type " + e.Type.String()
 }
 
+// An UnknownFieldsError describes a JSON object that
+// has unrecognized keys and DisallowUnknownFields is enabled.
+type UnknownFieldsError struct {
+	Keys []string // JSON keys that could not be mapped to fields
+}
+
+func (e *UnknownFieldsError) Error() string {
+	return fmt.Sprintf("json: object has unknown keys %q", e.Keys)
+}
+
 // An UnmarshalFieldError describes a JSON object key that
 // led to an unexported (and therefore unwritable) struct field.
 // (No longer used; kept for compatibility.)
@@ -185,6 +195,11 @@ func (d *decodeState) unmarshal(v interface{}) (err error) {
 	// We decode rv not rv.Elem because the Unmarshaler interface
 	// test must be applied at the top level of the value.
 	d.value(rv)
+
+	if len(d.unknownFields) > 0 {
+		d.saveError(&UnknownFieldsError{Keys: d.unknownFields})
+	}
+
 	return d.savedError
 }
 
@@ -276,6 +291,8 @@ type decodeState struct {
 	}
 	savedError error
 	useNumber  bool
+	disallowUnknownFields bool
+	unknownFields         []string
 }
 
 // errPhase is used for errors that should not happen unless
@@ -652,6 +669,8 @@ func (d *decodeState) object(v reflect.Value) {
 	}
 
 	var mapElem reflect.Value
+	// Key corresponding to ith field.
+	var usedFields [][]byte
 
 	for {
 		// Read opening " of string key or closing }.
@@ -687,15 +706,18 @@ func (d *decodeState) object(v reflect.Value) {
 			subv = mapElem
 		} else {
 			var f *field
+			var idx int
 			fields := cachedTypeFields(v.Type())
 			for i := range fields {
 				ff := &fields[i]
 				if bytes.Equal(ff.nameBytes, key) {
 					f = ff
+					idx = i
 					break
 				}
 				if f == nil && ff.equalFold(ff.nameBytes, key) {
 					f = ff
+					idx = i
 				}
 			}
 			if f != nil {
@@ -710,8 +732,21 @@ func (d *decodeState) object(v reflect.Value) {
 					}
 					subv = subv.Field(i)
 				}
+
+				if d.disallowUnknownFields {
+					if usedFields == nil {
+						usedFields = make([][]byte, len(fields))
+					}
+					if prev := usedFields[idx]; prev != nil {
+						d.unknownFields = append(d.unknownFields, string(prev))
+					}
+					usedFields[idx] = key
+				}
+
 				d.errorContext.Field = f.name
 				d.errorContext.Struct = v.Type().Name()
+			} else if d.disallowUnknownFields {
+				d.unknownFields = append(d.unknownFields, string(key))
 			}
 		}
 
